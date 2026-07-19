@@ -40,6 +40,16 @@ function fetchJSON(url, options = {}) {
 
 app.get('/', (req, res) => res.json({ status: 'SNPR backend running' }));
 
+app.get('/solprice', async (req, res) => {
+  try {
+    const r = await fetchJSON('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
+    const d = r.json();
+    res.json({ success: true, price: parseFloat(d.price) });
+  } catch(e) {
+    res.json({ success: false, price: 76 });
+  }
+});
+
 app.get('/tokens', async (req, res) => {
   let tokens = [];
 
