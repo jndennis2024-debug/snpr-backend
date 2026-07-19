@@ -49,7 +49,12 @@ app.get('/tokens', async (req, res) => {
     const d = r.json();
     const coins = Array.isArray(d) ? d : (d.coins || []);
     const now = Date.now();
-    tokens = coins.slice(0, 20).map(c => {
+    // Filter out old coins and only keep recent ones
+    const freshCoins = coins.filter(c => {
+      const age = Math.floor((Date.now() - (c.created_timestamp || Date.now())) / 60000);
+      return age < 1440 && c.mint !== 'pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn';
+    }).slice(0, 20);
+    tokens = freshCoins.map(c => {
       const age = Math.floor((now - (c.created_timestamp || now)) / 60000);
       let score = 0;
       if (c.usd_market_cap > 5000) score += 25;
@@ -78,13 +83,21 @@ app.get('/tokens', async (req, res) => {
     }
   } catch(e) {}
 
-  // SOURCE 2: DexScreener fallback
+  // SOURCE 2: DexScreener fallback - search for new tokens not the PUMP token
   try {
-    const r = await fetchJSON('https://api.dexscreener.com/latest/dex/search?q=pump');
+    const r = await fetchJSON('https://api.dexscreener.com/token-boosts/latest/v1');
     const d = r.json();
     const now = Date.now();
-    const pairs = (d.pairs || [])
-      .filter(p => p && p.chainId === 'solana' && parseFloat(p.liquidity?.usd || 0) > 500)
+    // Get token addresses from boosts, then fetch their pair data
+    const boosted = Array.isArray(d) ? d.filter(x => x.chainId === 'solana').slice(0, 10) : [];
+    if (!boosted.length) throw new Error('No boosted tokens');
+    const addrs = boosted.map(x => x.tokenAddress).join(',');
+    const r2 = await fetchJSON(`https://api.dexscreener.com/latest/dex/tokens/${addrs}`);
+    const d2 = r2.json();
+    const now2 = Date.now();
+    const pairs = (d2.pairs || [])
+      .filter(p => p && p.chainId === 'solana' && parseFloat(p.liquidity?.usd || 0) > 500
+        && p.baseToken?.address !== 'pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn') // exclude PUMP token
       .sort((a, b) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0))
       .slice(0, 20);
     tokens = pairs.map(p => {
