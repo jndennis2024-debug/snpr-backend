@@ -1,29 +1,51 @@
 const express = require('express');
 const cors = require('cors');
-const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
+const https = require('https');
+const http = require('http');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+function fetchJSON(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('https') ? https : http;
+    const reqOptions = { ...options };
+    if (options.body) {
+      reqOptions.headers = { ...reqOptions.headers, 'Content-Length': Buffer.byteLength(options.body) };
+    }
+    const req = lib.request(url, reqOptions, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve({ ok: res.statusCode < 400, status: res.statusCode, json: () => JSON.parse(data), buffer: () => Buffer.from(data) }); }
+        catch(e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
 
 app.get('/', (req, res) => res.json({ status: 'SNPR backend running' }));
 
 app.get('/tokens', async (req, res) => {
   try {
     let allPairs = [];
-    const searches = ['pump', 'solana meme'];
-    for (const q of searches) {
-      const r = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${q}`);
-      const d = await r.json();
-      if (d.pairs) allPairs = allPairs.concat(d.pairs);
+    for (const q of ['pump', 'solana']) {
+      try {
+        const r = await fetchJSON(`https://api.dexscreener.com/latest/dex/search?q=${q}`);
+        const d = r.json();
+        if (d.pairs) allPairs = allPairs.concat(d.pairs);
+      } catch(e) {}
     }
     const now = Date.now();
     const seen = {};
     const tokens = allPairs
       .filter(p => {
         if (!p || p.chainId !== 'solana') return false;
-        if (!p.pairCreatedAt) return false;
-        if (seen[p.pairAddress]) return false;
+        if (!p.pairCreatedAt || seen[p.pairAddress]) return false;
         seen[p.pairAddress] = true;
         const age = (now - p.pairCreatedAt) / 60000;
         return age < 120 && parseFloat(p.liquidity?.usd || 0) > 500;
@@ -49,8 +71,7 @@ app.get('/tokens', async (req, res) => {
           pairAddress: p.pairAddress || '',
           price: parseFloat(p.priceUsd || 0),
           liq, buys, sells, ch5,
-          age, score: Math.min(100, score),
-          sim: false
+          age, score: Math.min(100, score), sim: false
         };
       });
     res.json({ success: true, tokens });
@@ -62,14 +83,14 @@ app.get('/tokens', async (req, res) => {
 app.post('/swap/pump', async (req, res) => {
   try {
     const { publicKey, mint, amount } = req.body;
-    const r = await fetch('https://pumpportal.fun/api/trade-local', {
+    const body = JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.0005, pool: 'pump' });
+    const r = await fetchJSON('https://pumpportal.fun/api/trade-local', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.0005, pool: 'pump' })
+      body
     });
     if (!r.ok) throw new Error('PumpPortal HTTP ' + r.status);
-    const buf = await r.arrayBuffer();
-    const b64 = Buffer.from(buf).toString('base64');
+    const b64 = r.buffer().toString('base64');
     res.json({ success: true, transaction: b64 });
   } catch (e) {
     res.json({ success: false, error: e.message });
@@ -79,15 +100,16 @@ app.post('/swap/pump', async (req, res) => {
 app.post('/swap/jupiter', async (req, res) => {
   try {
     const { publicKey, inputMint, outputMint, amount } = req.body;
-    const qr = await fetch(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=2000`);
-    const q = await qr.json();
+    const qr = await fetchJSON(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=2000`);
+    const q = qr.json();
     if (!q.outAmount) throw new Error(q.error || 'No route');
-    const sr = await fetch('https://quote-api.jup.ag/v6/swap', {
+    const body = JSON.stringify({ quoteResponse: q, userPublicKey: publicKey, wrapAndUnwrapSol: true, prioritizationFeeLamports: 100000 });
+    const sr = await fetchJSON('https://quote-api.jup.ag/v6/swap', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ quoteResponse: q, userPublicKey: publicKey, wrapAndUnwrapSol: true, prioritizationFeeLamports: 100000 })
+      body
     });
-    const sd = await sr.json();
+    const sd = sr.json();
     if (!sd.swapTransaction) throw new Error(sd.error || 'No tx');
     res.json({ success: true, transaction: sd.swapTransaction });
   } catch (e) {
@@ -96,4 +118,4 @@ app.post('/swap/jupiter', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('SNPR backend on port', PORT));
+app.listen(PORT, () => console.log('SNPR backend running on port', PORT));
