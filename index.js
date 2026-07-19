@@ -51,7 +51,7 @@ app.get('/', (req, res) => res.json({ status: 'SNPR backend v3 - Birdeye powered
 
 app.get('/debug-birdeye', async (req, res) => {
   try {
-    const r = await fetchJSON('https://public-api.birdeye.so/defi/token_new_listing?chain=solana&limit=5', {
+    const r = await fetchJSON('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=5&min_liquidity=500', {
       headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
     });
     res.json({ status: r.status, ok: r.ok, data: r.json() });
@@ -70,7 +70,7 @@ app.get('/solprice', async (req, res) => {
 app.get('/tokens', async (req, res) => {
   // SOURCE 1: Birdeye new listings on Solana
   try {
-    const r = await fetchJSON('https://public-api.birdeye.so/defi/token_new_listing?chain=solana&limit=20', {
+    const r = await fetchJSON('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&min_liquidity=1000', {
       headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
     });
     const d = r.json();
@@ -122,7 +122,7 @@ app.get('/tokens', async (req, res) => {
 
   // SOURCE 2: Birdeye trending tokens as fallback
   try {
-    const r = await fetchJSON('https://public-api.birdeye.so/defi/trending_tokens?chain=solana&limit=20', {
+    const r = await fetchJSON('https://public-api.birdeye.so/defi/token_trending?sort_by=rank&sort_type=asc&offset=0&limit=20', {
       headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
     });
     const d = r.json();
