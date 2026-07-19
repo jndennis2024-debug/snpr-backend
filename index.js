@@ -1,55 +1,24 @@
-const express = require('express');
-const cors = require('cors');
-const https = require('https');
-const http = require('http');
-
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-function fetchJSON(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const lib = url.startsWith('https') ? https : http;
-    const reqOptions = { ...options };
-    if (options.body) {
-      reqOptions.headers = { ...reqOptions.headers, 'Content-Length': Buffer.byteLength(options.body) };
-    }
-    const req = lib.request(url, reqOptions, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try { resolve({ ok: res.statusCode < 400, status: res.statusCode, json: () => JSON.parse(data), buffer: () => Buffer.from(data) }); }
-        catch(e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    if (options.body) req.write(options.body);
-    req.end();
-  });
-}
-
-app.get('/', (req, res) => res.json({ status: 'SNPR backend running' }));
-
 app.get('/tokens', async (req, res) => {
   try {
     let allPairs = [];
-    for (const q of ['pump', 'solana']) {
+    let debugInfo = [];
+    for (const q of ['pump', 'solana', 'meme']) {
       try {
         const r = await fetchJSON(`https://api.dexscreener.com/latest/dex/search?q=${q}`);
         const d = r.json();
+        const total = d.pairs?.length || 0;
+        const solana = (d.pairs || []).filter(p => p.chainId === 'solana').length;
+        debugInfo.push(`${q}: ${total} total, ${solana} solana`);
         if (d.pairs) allPairs = allPairs.concat(d.pairs);
-      } catch(e) {}
+      } catch(e) { debugInfo.push(`${q}: error ${e.message}`); }
     }
     const now = Date.now();
     const seen = {};
-    const tokens = allPairs
-      .filter(p => {
-        if (!p || p.chainId !== 'solana') return false;
-        if (!p.pairCreatedAt || seen[p.pairAddress]) return false;
-        seen[p.pairAddress] = true;
-        const age = (now - p.pairCreatedAt) / 60000;
-        return age < 1440 && parseFloat(p.liquidity?.usd || 0) > 500;
-      })
+    const all = allPairs.filter(p => p && p.chainId === 'solana' && !seen[p.pairAddress] && (seen[p.pairAddress] = true));
+    const withAge = all.filter(p => p.pairCreatedAt);
+    const recent = withAge.filter(p => (now - p.pairCreatedAt) / 60000 < 1440);
+    const withLiq = recent.filter(p => parseFloat(p.liquidity?.usd || 0) > 500);
+    const tokens = withLiq
       .sort((a, b) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0))
       .slice(0, 20)
       .map(p => {
@@ -74,48 +43,8 @@ app.get('/tokens', async (req, res) => {
           age, score: Math.min(100, score), sim: false
         };
       });
-    res.json({ success: true, tokens });
+    res.json({ success: true, tokens, debug: { queries: debugInfo, totalPairs: allPairs.length, solana: all.length, withAge: withAge.length, recent: recent.length, withLiq: withLiq.length } });
   } catch (e) {
     res.json({ success: false, error: e.message, tokens: [] });
   }
 });
-
-app.post('/swap/pump', async (req, res) => {
-  try {
-    const { publicKey, mint, amount } = req.body;
-    const body = JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.0005, pool: 'pump' });
-    const r = await fetchJSON('https://pumpportal.fun/api/trade-local', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body
-    });
-    if (!r.ok) throw new Error('PumpPortal HTTP ' + r.status);
-    const b64 = r.buffer().toString('base64');
-    res.json({ success: true, transaction: b64 });
-  } catch (e) {
-    res.json({ success: false, error: e.message });
-  }
-});
-
-app.post('/swap/jupiter', async (req, res) => {
-  try {
-    const { publicKey, inputMint, outputMint, amount } = req.body;
-    const qr = await fetchJSON(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&slippageBps=2000`);
-    const q = qr.json();
-    if (!q.outAmount) throw new Error(q.error || 'No route');
-    const body = JSON.stringify({ quoteResponse: q, userPublicKey: publicKey, wrapAndUnwrapSol: true, prioritizationFeeLamports: 100000 });
-    const sr = await fetchJSON('https://quote-api.jup.ag/v6/swap', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body
-    });
-    const sd = sr.json();
-    if (!sd.swapTransaction) throw new Error(sd.error || 'No tx');
-    res.json({ success: true, transaction: sd.swapTransaction });
-  } catch (e) {
-    res.json({ success: false, error: e.message });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('SNPR backend running on port', PORT));
