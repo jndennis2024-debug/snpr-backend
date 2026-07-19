@@ -32,9 +32,10 @@ function fetchJSON(url, options = {}) {
   });
 }
 
-function pumpBuy(publicKey, mint, amount) {
+function pumpBuy(publicKey, mint, amount, pool) {
+  pool = pool || 'pump';
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.005, pool: 'pump' });
+    const body = JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.005, pool: pool });
     const bodyBuf = Buffer.from(body);
     const opts = { hostname: 'pumpportal.fun', path: '/api/trade-local', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': bodyBuf.length } };
     const req = https.request(opts, (res) => {
@@ -167,17 +168,23 @@ app.get('/tokens', async (req, res) => {
 
 app.post('/swap/auto', async (req, res) => {
   try {
-    const { publicKey, mint, amount } = req.body;
-    const rawBytes = await pumpBuy(publicKey, mint, amount);
-    const preview = rawBytes ? rawBytes.slice(0,4).toString('hex') : 'null';
-    console.log('PumpPortal response: bytes='+rawBytes?.length+' preview='+preview);
-    if (rawBytes && rawBytes.length > 100 && rawBytes[0] === 1) {
-      return res.json({ success: true, transaction: rawBytes.toString('base64'), source: 'pump' });
+    const { publicKey, mint, amount, tokenSource } = req.body;
+    
+    // pump_amm = graduated to Raydium, use 'raydium' pool
+    // pump bonding curve = use 'pump' pool
+    const pools = tokenSource === 'pump_amm' ? ['raydium', 'pump'] : ['pump', 'raydium'];
+    
+    for (const pool of pools) {
+      try {
+        const rawBytes = await pumpBuy(publicKey, mint, amount, pool);
+        const text = rawBytes ? rawBytes.toString('utf8').slice(0,100) : 'empty';
+        console.log('Pool '+pool+': bytes='+rawBytes?.length+' text='+text.slice(0,50));
+        if (rawBytes && rawBytes.length > 100 && rawBytes[0] === 1) {
+          return res.json({ success: true, transaction: rawBytes.toString('base64'), source: 'pump-'+pool });
+        }
+      } catch(pe) { console.log('Pool '+pool+' error: '+pe.message); }
     }
-    // If response looks like text/JSON error, log it
-    const text = rawBytes ? rawBytes.toString('utf8').slice(0,200) : 'empty';
-    console.log('PumpPortal text response:', text);
-    throw new Error('PumpPortal: ' + text.slice(0,100));
+    throw new Error('All pools failed for ' + mint);
   } catch(e) {
     res.json({ success: false, error: e.message });
   }
