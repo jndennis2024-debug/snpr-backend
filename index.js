@@ -40,6 +40,44 @@ function fetchJSON(url, options = {}) {
 
 app.get('/', (req, res) => res.json({ status: 'SNPR backend running' }));
 
+// Debug: test pump swap and return first 20 bytes as hex
+app.get('/test-pump/:mint', async (req, res) => {
+  try {
+    const mint = req.params.mint;
+    const body = JSON.stringify({
+      publicKey: '96rL3TGKar2EUY6Ec332cDRnTt7MRc4oDEWQTXh4N5zJ',
+      action: 'buy', mint,
+      denominatedInSol: 'true', amount: 0.001,
+      slippage: 25, priorityFee: 0.0005, pool: 'pump'
+    });
+    const https = require('https');
+    const bodyBuf = Buffer.from(body);
+    const rawBytes = await new Promise((resolve, reject) => {
+      const opts = {
+        hostname: 'pumpportal.fun', path: '/api/trade-local',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': bodyBuf.length }
+      };
+      const req2 = https.request(opts, (res2) => {
+        const chunks = [];
+        res2.on('data', chunk => chunks.push(chunk));
+        res2.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+      req2.on('error', reject);
+      req2.write(bodyBuf); req2.end();
+    });
+    res.json({
+      length: rawBytes.length,
+      first20hex: rawBytes.slice(0,20).toString('hex'),
+      first20bytes: Array.from(rawBytes.slice(0,20)),
+      isBase64: false,
+      base64preview: rawBytes.toString('base64').slice(0,50)
+    });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
 app.get('/solprice', async (req, res) => {
   try {
     const r = await fetchJSON('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
@@ -148,14 +186,35 @@ app.post('/swap/pump', async (req, res) => {
       denominatedInSol: 'true', amount,
       slippage: 25, priorityFee: 0.0005, pool: 'pump'
     });
-    const r = await fetchJSON('https://pumpportal.fun/api/trade-local', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body
+
+    // Use raw https to get binary response properly
+    const https = require('https');
+    const urlObj = new URL('https://pumpportal.fun/api/trade-local');
+    const bodyBuf = Buffer.from(body);
+
+    const rawBytes = await new Promise((resolve, reject) => {
+      const opts = {
+        hostname: urlObj.hostname,
+        path: urlObj.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': bodyBuf.length
+        }
+      };
+      const req2 = https.request(opts, (res2) => {
+        const chunks = [];
+        res2.on('data', chunk => chunks.push(chunk));
+        res2.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+      req2.on('error', reject);
+      req2.write(bodyBuf);
+      req2.end();
     });
-    if (!r.ok) throw new Error('PumpPortal HTTP ' + r.status);
-    const b64 = r.buffer().toString('base64');
-    res.json({ success: true, transaction: b64 });
+
+    if (!rawBytes || rawBytes.length < 10) throw new Error('Empty response from PumpPortal');
+    const b64 = rawBytes.toString('base64');
+    res.json({ success: true, transaction: b64, bytes: rawBytes.length });
   } catch(e) {
     res.json({ success: false, error: e.message });
   }
