@@ -169,10 +169,15 @@ app.post('/swap/auto', async (req, res) => {
   try {
     const { publicKey, mint, amount } = req.body;
     const rawBytes = await pumpBuy(publicKey, mint, amount);
-    if (rawBytes && rawBytes.length > 100) {
+    const preview = rawBytes ? rawBytes.slice(0,4).toString('hex') : 'null';
+    console.log('PumpPortal response: bytes='+rawBytes?.length+' preview='+preview);
+    if (rawBytes && rawBytes.length > 100 && rawBytes[0] === 1) {
       return res.json({ success: true, transaction: rawBytes.toString('base64'), source: 'pump' });
     }
-    throw new Error('Empty pump response - token may have graduated');
+    // If response looks like text/JSON error, log it
+    const text = rawBytes ? rawBytes.toString('utf8').slice(0,200) : 'empty';
+    console.log('PumpPortal text response:', text);
+    throw new Error('PumpPortal: ' + text.slice(0,100));
   } catch(e) {
     res.json({ success: false, error: e.message });
   }
