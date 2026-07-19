@@ -256,10 +256,10 @@ async function runTgBot() {
           '1. Open Phantom app\n' +
           '2. Tap <b>Swap</b>\n' +
           '3. Tap the output token field\n' +
-          '4. Paste this contract address:\n\n' +
-          '<code>' + addr + '</code>\n\n' +
-          '5. Enter SOL amount → Swap\n\n' +
-          'Reply <b>"bought 0.05"</b> (your SOL amount) to track your position.';
+          '👇 <b>Tap to swap in Phantom:</b>\n' +
+          'https://phantom.app/ul/swap?inputMint=So11111111111111111111111111111111111111112&outputMint=' + addr + '\n\n' +
+          'Contract (hold to copy):\n<code>' + addr + '</code>\n\n' +
+          'Reply <b>"bought 0.05"</b> to track your position.';
 
         await tgSend(msg);
         console.log('TG BUY alert sent for ' + name);
