@@ -262,6 +262,7 @@ async function runTgBot() {
           'Reply <b>"bought 0.05"</b> to track your position.';
 
         await tgSend(msg);
+        await tgSend(addr);  // Send contract address as separate message for easy copying
         console.log('TG BUY alert sent for ' + name);
 
         // Auto-clear alert after 30 mins so it can re-alert if still relevant
