@@ -6,6 +6,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const BIRDEYE_KEY = '1eac17369423494f870737d134b2771e';
+
 function fetchJSON(url, options = {}) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
@@ -45,7 +47,7 @@ function pumpBuy(publicKey, mint, amount) {
   });
 }
 
-app.get('/', (req, res) => res.json({ status: 'SNPR backend running v2' }));
+app.get('/', (req, res) => res.json({ status: 'SNPR backend v3 - Birdeye powered' }));
 
 app.get('/solprice', async (req, res) => {
   try {
@@ -55,49 +57,88 @@ app.get('/solprice', async (req, res) => {
 });
 
 app.get('/tokens', async (req, res) => {
-  // Try pump.fun endpoints for bonding curve tokens
-  const endpoints = [
-    'https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=created_timestamp&order=DESC&includeNsfw=false',
-    'https://client-api-2-74b1891ee9f9.herokuapp.com/coins?offset=0&limit=50&sort=created_timestamp&order=DESC&includeNsfw=false'
-  ];
-
-  for (const url of endpoints) {
-    try {
-      const r = await fetchJSON(url);
-      const d = r.json();
-      const coins = Array.isArray(d) ? d : (d.coins || []);
-      if (!coins.length) continue;
+  // SOURCE 1: Birdeye new listings on Solana
+  try {
+    const r = await fetchJSON('https://public-api.birdeye.so/defi/token_new_listing?chain=solana&limit=20', {
+      headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
+    });
+    const d = r.json();
+    const items = d.data?.items || [];
+    if (items.length > 0) {
       const now = Date.now();
-      const tokens = coins
-        .filter(c => {
-          const age = Math.floor((now - (c.created_timestamp || now)) / 60000);
-          return age < 120 && !c.complete && (c.usd_market_cap || 0) > 500;
-        })
-        .slice(0, 20)
-        .map(c => {
-          const age = Math.floor((now - (c.created_timestamp || now)) / 60000);
-          const liq = c.virtual_sol_reserves ? (c.virtual_sol_reserves / 1e9) * 76 : 0;
+      const tokens = await Promise.all(items.slice(0, 15).map(async (item) => {
+        // Get more details for each token
+        try {
+          const r2 = await fetchJSON(`https://public-api.birdeye.so/defi/token_overview?address=${item.address}`, {
+            headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
+          });
+          const d2 = r2.json();
+          const t = d2.data || {};
+          const age = Math.floor((now - (item.listingTime * 1000 || now)) / 60000);
+          const liq = t.liquidity || 0;
+          const mc = t.mc || 0;
+          const v5m = t.v5mUSD || 0;
+          const ch5 = t.priceChange5mPercent || 0;
           let score = 0;
-          if ((c.usd_market_cap||0) > 5000) score += 20;
-          if ((c.usd_market_cap||0) > 20000) score += 25;
-          if ((c.reply_count||0) > 5) score += 15;
-          if ((c.reply_count||0) > 20) score += 15;
-          if (age < 10) score += 25;
-          else if (age < 30) score += 10;
+          if (liq > 2000) score += 20;
+          if (liq > 10000) score += 15;
+          if (mc > 5000) score += 15;
+          if (mc < 500000) score += 15;
+          if (ch5 > 0) score += 15;
+          if (v5m > 1000) score += 20;
+          if (age < 10) score += 20;
           return {
-            name: c.name || 'Unknown', ticker: c.symbol || '???',
-            address: c.mint || '', pairAddress: c.mint || '',
-            price: (c.usd_market_cap||0) / 1e9,
-            liq, buys: c.reply_count || 0, sells: 0, ch5: 0,
-            age, score: Math.min(100, score), sim: false,
-            dexUrl: 'https://pump.fun/' + (c.mint||'')
+            name: t.name || item.name || 'Unknown',
+            ticker: t.symbol || item.symbol || '???',
+            address: item.address,
+            pairAddress: item.address,
+            price: t.price || 0,
+            liq, buys: t.trade5m || 0, sells: 0,
+            ch5, age, score: Math.min(100, score),
+            sim: false, mc,
+            dexUrl: 'https://pump.fun/' + item.address
           };
-        });
-      if (tokens.length > 0) return res.json({ success: true, tokens, source: url.includes('frontend') ? 'pump-frontend' : 'pump-heroku' });
-    } catch(e) { continue; }
-  }
+        } catch(e) {
+          return null;
+        }
+      }));
+      const valid = tokens.filter(t => t && t.liq > 500);
+      if (valid.length > 0) {
+        return res.json({ success: true, tokens: valid, source: 'birdeye' });
+      }
+    }
+  } catch(e) {}
 
-  // DexScreener fallback
+  // SOURCE 2: Birdeye trending tokens as fallback
+  try {
+    const r = await fetchJSON('https://public-api.birdeye.so/defi/trending_tokens?chain=solana&limit=20', {
+      headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
+    });
+    const d = r.json();
+    const items = d.data?.tokens || d.data?.items || [];
+    if (items.length > 0) {
+      const now = Date.now();
+      const tokens = items.slice(0, 15).map(t => {
+        const age = t.createdAt ? Math.floor((now - t.createdAt * 1000) / 60000) : 999;
+        const liq = t.liquidity || 0;
+        const ch5 = t.priceChange5m || t.price5mChangePercent || 0;
+        let score = 0;
+        if (liq > 2000) score += 20; if (liq > 10000) score += 15;
+        if (ch5 > 0) score += 20; if (ch5 > 10) score += 15;
+        if (age < 30) score += 20; if (age < 10) score += 10;
+        return {
+          name: t.name || 'Unknown', ticker: t.symbol || '???',
+          address: t.address, pairAddress: t.address,
+          price: t.price || 0, liq, buys: t.trade5m || 0, sells: 0,
+          ch5, age, score: Math.min(100, score), sim: false,
+          dexUrl: 'https://pump.fun/' + t.address
+        };
+      }).filter(t => t.liq > 500);
+      if (tokens.length > 0) return res.json({ success: true, tokens, source: 'birdeye-trending' });
+    }
+  } catch(e) {}
+
+  // SOURCE 3: DexScreener last resort
   try {
     const r = await fetchJSON('https://api.dexscreener.com/token-boosts/latest/v1');
     const d = r.json();
@@ -133,11 +174,11 @@ app.post('/swap/auto', async (req, res) => {
     if (rawBytes && rawBytes.length > 100) {
       return res.json({ success: true, transaction: rawBytes.toString('base64'), source: 'pump' });
     }
-    throw new Error('Empty pump response');
+    throw new Error('Empty pump response - token may have graduated');
   } catch(e) {
     res.json({ success: false, error: e.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('SNPR backend v2 running on port', PORT));
+app.listen(PORT, () => console.log('SNPR backend v3 running on port', PORT));
