@@ -220,6 +220,41 @@ app.post('/swap/pump', async (req, res) => {
   }
 });
 
+// Auto-route: tries pump first, falls back to Jupiter if graduated
+app.post('/swap/auto', async (req, res) => {
+  try {
+    const { publicKey, mint, amount } = req.body;
+    const lam = Math.floor(amount * 1e9);
+
+    // Try pump first
+    try {
+      const body = JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.0005, pool: 'pump' });
+      const bodyBuf = Buffer.from(body);
+      const https = require('https');
+      const rawBytes = await new Promise((resolve, reject) => {
+        const opts = { hostname: 'pumpportal.fun', path: '/api/trade-local', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': bodyBuf.length } };
+        const req2 = https.request(opts, (res2) => { const chunks = []; res2.on('data', c => chunks.push(c)); res2.on('end', () => resolve(Buffer.concat(chunks))); });
+        req2.on('error', reject); req2.write(bodyBuf); req2.end();
+      });
+      if (rawBytes && rawBytes.length > 100) {
+        return res.json({ success: true, transaction: rawBytes.toString('base64'), source: 'pump' });
+      }
+    } catch(pe) {}
+
+    // Fall back to Jupiter
+    const qr = await fetchJSON(`https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${mint}&amount=${lam}&slippageBps=2000`);
+    const q = qr.json();
+    if (!q.outAmount) throw new Error(q.error || 'No Jupiter route');
+    const body2 = JSON.stringify({ quoteResponse: q, userPublicKey: publicKey, wrapAndUnwrapSol: true, prioritizationFeeLamports: 100000 });
+    const sr = await fetchJSON('https://quote-api.jup.ag/v6/swap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body2 });
+    const sd = sr.json();
+    if (!sd.swapTransaction) throw new Error(sd.error || 'No Jupiter tx');
+    return res.json({ success: true, transaction: sd.swapTransaction, source: 'jupiter' });
+  } catch(e) {
+    res.json({ success: false, error: e.message });
+  }
+});
+
 app.post('/swap/jupiter', async (req, res) => {
   try {
     const { publicKey, inputMint, outputMint, amount } = req.body;
