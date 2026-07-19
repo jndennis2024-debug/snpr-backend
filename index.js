@@ -49,6 +49,17 @@ function pumpBuy(publicKey, mint, amount) {
 
 app.get('/', (req, res) => res.json({ status: 'SNPR backend v3 - Birdeye powered' }));
 
+app.get('/debug-birdeye', async (req, res) => {
+  try {
+    const r = await fetchJSON('https://public-api.birdeye.so/defi/token_new_listing?chain=solana&limit=5', {
+      headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
+    });
+    res.json({ status: r.status, ok: r.ok, data: r.json() });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
 app.get('/solprice', async (req, res) => {
   try {
     const r = await fetchJSON('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
