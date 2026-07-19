@@ -192,3 +192,180 @@ app.post('/swap/auto', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('SNPR backend v3 running on port', PORT));
+
+// ─── TELEGRAM BOT ────────────────────────────────────────────────────────────
+const TG_TOKEN = '8601216988:AAEMde9_gBTndYMe2_wBNjC5nk1Rm0Yg3FE';
+const TG_CHAT  = '8883767485';
+const BIRDEYE_KEY2 = '1eac17369423494f870737d134b2771e';
+
+function tgSend(text) {
+  const body = JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: 'HTML', disable_web_page_preview: true });
+  const buf = Buffer.from(body);
+  return new Promise((res, rej) => {
+    const opts = {
+      hostname: 'api.telegram.org',
+      path: '/bot' + TG_TOKEN + '/sendMessage',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': buf.length }
+    };
+    const req = https.request(opts, r => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>res(d)); });
+    req.on('error', rej);
+    req.write(buf); req.end();
+  });
+}
+
+// Track positions and sent alerts
+var tgPositions = {};
+var tgAlerted = {};
+
+async function runTgBot() {
+  try {
+    // Fetch fresh tokens
+    const r = await fetchJSON('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&min_liquidity=1000', {
+      headers: { 'X-API-KEY': BIRDEYE_KEY2, 'x-chain': 'solana' }
+    });
+    const d = r.json();
+    const items = (d.data?.items || []).filter(i => i.liquidity > 1000);
+    const now = Date.now();
+
+    for (const item of items) {
+      const age = Math.floor((now - new Date(item.liquidityAddedAt).getTime()) / 60000);
+      const liq = item.liquidity || 0;
+      const addr = item.address;
+      const name = item.name || 'Unknown';
+      const ticker = item.symbol || '???';
+
+      // Score
+      let score = 0;
+      if (liq > 5000) score += 20;
+      if (liq > 20000) score += 20;
+      if (liq > 50000) score += 15;
+      if (age < 5) score += 30;
+      else if (age < 15) score += 15;
+      if (item.source === 'pump_amm') score += 15;
+
+      // Send BUY alert if score high enough and not already alerted
+      if (score >= 60 && !tgAlerted[addr] && age < 15) {
+        tgAlerted[addr] = true;
+        const jupLink = 'https://jup.ag/swap/SOL-' + addr;
+        const msg =
+          '🟢 <b>BUY SIGNAL: ' + name + ' ($' + ticker + ')</b>\n\n' +
+          '💧 Liquidity: $' + (liq >= 1000 ? (liq/1000).toFixed(1)+'K' : liq.toFixed(0)) + '\n' +
+          '⏱ Age: ' + age + ' minutes old\n' +
+          '📊 Score: ' + score + '/100\n' +
+          '🔗 Source: ' + (item.source || 'unknown') + '\n\n' +
+          '👇 <b>To buy:</b>\n' +
+          '1. Open Jupiter: ' + jupLink + '\n' +
+          '2. Click "Paste CA" and paste:\n<code>' + addr + '</code>\n\n' +
+          'Reply with how much SOL you bought (e.g. "bought 0.05") to track your position.';
+
+        await tgSend(msg);
+        console.log('TG BUY alert sent for ' + name);
+
+        // Auto-clear alert after 30 mins so it can re-alert if still relevant
+        setTimeout(() => { delete tgAlerted[addr]; }, 30 * 60 * 1000);
+      }
+    }
+
+    // Check open positions for sell signals
+    for (const addr in tgPositions) {
+      const pos = tgPositions[addr];
+      try {
+        const pr = await fetchJSON('https://public-api.birdeye.so/defi/price?address=' + addr, {
+          headers: { 'X-API-KEY': BIRDEYE_KEY2, 'x-chain': 'solana' }
+        });
+        const pd = pr.json();
+        const currentPrice = pd.data?.value || 0;
+        if (!currentPrice || !pos.entryPrice) continue;
+
+        const pct = (currentPrice - pos.entryPrice) / pos.entryPrice * 100;
+        pos.currentPrice = currentPrice;
+        pos.pct = pct;
+
+        // Sell signals
+        if (pct >= 200 && !pos.tp3xSent) {
+          pos.tp3xSent = true;
+          await tgSend(
+            '🎯 <b>TAKE PROFIT: ' + pos.name + '</b>\n\n' +
+            '🚀 Up <b>+' + pct.toFixed(0) + '%</b> (3x hit!)\n' +
+            'Entry: $' + pos.entryPrice.toFixed(8) + '\n' +
+            'Now: $' + currentPrice.toFixed(8) + '\n\n' +
+            '💰 Sell on Jupiter:\nhttps://jup.ag/swap/' + addr + '-SOL\n\n' +
+            'Reply "sold" to close position.'
+          );
+        } else if (pct <= -50 && !pos.slSent) {
+          pos.slSent = true;
+          await tgSend(
+            '⚠️ <b>STOP LOSS: ' + pos.name + '</b>\n\n' +
+            '📉 Down <b>' + pct.toFixed(0) + '%</b>\n' +
+            'Entry: $' + pos.entryPrice.toFixed(8) + '\n' +
+            'Now: $' + currentPrice.toFixed(8) + '\n\n' +
+            '🔴 Consider cutting losses:\nhttps://jup.ag/swap/' + addr + '-SOL'
+          );
+        } else if (pct >= 50 && !pos.tp50Sent) {
+          pos.tp50Sent = true;
+          await tgSend(
+            '📈 <b>UP 50%: ' + pos.name + '</b>\n\n' +
+            'Currently at +' + pct.toFixed(0) + '%. Consider taking some profit or moving stop loss to breakeven.'
+          );
+        }
+      } catch(e) {}
+    }
+  } catch(e) {
+    console.log('TG bot error:', e.message);
+  }
+}
+
+// Poll Telegram for user replies
+let tgOffset = 0;
+async function pollTg() {
+  try {
+    const r = await fetchJSON('https://api.telegram.org/bot' + TG_TOKEN + '/getUpdates?offset=' + tgOffset + '&timeout=5');
+    const d = r.json();
+    for (const update of (d.result || [])) {
+      tgOffset = update.update_id + 1;
+      const text = update.message?.text?.toLowerCase() || '';
+
+      if (text.includes('bought')) {
+        // Parse: "bought 0.05 SOL" or just "bought"
+        const match = text.match(/[\d.]+/);
+        const sol = match ? parseFloat(match[0]) : 0.05;
+        // Find most recently alerted token
+        const recentAddr = Object.keys(tgAlerted)[Object.keys(tgAlerted).length - 1];
+        if (recentAddr) {
+          // Get current price
+          try {
+            const pr = await fetchJSON('https://public-api.birdeye.so/defi/price?address=' + recentAddr, {
+              headers: { 'X-API-KEY': BIRDEYE_KEY2, 'x-chain': 'solana' }
+            });
+            const pd = pr.json();
+            const price = pd.data?.value || 0;
+            tgPositions[recentAddr] = { name: recentAddr.slice(0,8)+'...', entryPrice: price, sol, pct: 0 };
+            await tgSend('✅ Position tracked!\nEntry price: $' + price.toFixed(8) + '\n' + sol + ' SOL\nI\'ll alert you at +50%, 3x, or -50%.');
+          } catch(e) {}
+        } else {
+          await tgSend('Send me a token address to track: "track [address]"');
+        }
+      } else if (text.includes('sold')) {
+        const addrs = Object.keys(tgPositions);
+        if (addrs.length > 0) {
+          const addr = addrs[addrs.length - 1];
+          const pos = tgPositions[addr];
+          delete tgPositions[addr];
+          await tgSend('✅ Position closed!\nFinal P&L: ' + (pos.pct >= 0 ? '+' : '') + pos.pct.toFixed(1) + '%\nGood trade! 🎉');
+        }
+      } else if (text.includes('status')) {
+        const lines = Object.entries(tgPositions).map(([a, p]) => p.name + ': ' + (p.pct >= 0 ? '+' : '') + (p.pct || 0).toFixed(1) + '%');
+        await tgSend(lines.length ? '📊 Open positions:\n' + lines.join('\n') : 'No open positions.');
+      } else if (text === '/start' || text === 'hi' || text === 'hello') {
+        await tgSend('👋 SNPR bot ready!\n\nI\'ll send you buy signals automatically.\n\nCommands:\n• Reply "bought 0.05" after buying\n• Reply "sold" to close position\n• Reply "status" to see open positions');
+      }
+    }
+  } catch(e) {}
+}
+
+// Start bot loops
+setInterval(runTgBot, 30000);  // scan every 30s
+setInterval(pollTg, 3000);     // check replies every 3s
+runTgBot();                     // run immediately
+console.log('Telegram bot started for chat', TG_CHAT);
