@@ -48,7 +48,7 @@ app.get('/test-pump/:mint', async (req, res) => {
       publicKey: '96rL3TGKar2EUY6Ec332cDRnTt7MRc4oDEWQTXh4N5zJ',
       action: 'buy', mint,
       denominatedInSol: 'true', amount: 0.001,
-      slippage: 25, priorityFee: 0.0005, pool: 'pump'
+      slippage: 25, priorityFee: 0.005, pool: 'pump'
     });
     const https = require('https');
     const bodyBuf = Buffer.from(body);
@@ -184,7 +184,7 @@ app.post('/swap/pump', async (req, res) => {
     const body = JSON.stringify({
       publicKey, action: 'buy', mint,
       denominatedInSol: 'true', amount,
-      slippage: 25, priorityFee: 0.0005, pool: 'pump'
+      slippage: 25, priorityFee: 0.005, pool: 'pump'
     });
 
     // Use raw https to get binary response properly
@@ -228,7 +228,7 @@ app.post('/swap/auto', async (req, res) => {
 
     // Try pump first
     try {
-      const body = JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.0005, pool: 'pump' });
+      const body = JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.005, pool: 'pump' });
       const bodyBuf = Buffer.from(body);
       const https = require('https');
       const rawBytes = await new Promise((resolve, reject) => {
@@ -245,7 +245,7 @@ app.post('/swap/auto', async (req, res) => {
     const qr = await fetchJSON(`https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${mint}&amount=${lam}&slippageBps=2000`);
     const q = qr.json();
     if (!q.outAmount) throw new Error(q.error || 'No Jupiter route');
-    const body2 = JSON.stringify({ quoteResponse: q, userPublicKey: publicKey, wrapAndUnwrapSol: true, prioritizationFeeLamports: 100000 });
+    const body2 = JSON.stringify({ quoteResponse: q, userPublicKey: publicKey, wrapAndUnwrapSol: true, prioritizationFeeLamports: 500000 });
     const sr = await fetchJSON('https://quote-api.jup.ag/v6/swap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body2 });
     const sd = sr.json();
     if (!sd.swapTransaction) throw new Error(sd.error || 'No Jupiter tx');
@@ -263,7 +263,7 @@ app.post('/swap/jupiter', async (req, res) => {
     if (!q.outAmount) throw new Error(q.error || 'No route');
     const body = JSON.stringify({
       quoteResponse: q, userPublicKey: publicKey,
-      wrapAndUnwrapSol: true, prioritizationFeeLamports: 100000
+      wrapAndUnwrapSol: true, prioritizationFeeLamports: 500000
     });
     const sr = await fetchJSON('https://quote-api.jup.ag/v6/swap', {
       method: 'POST',
