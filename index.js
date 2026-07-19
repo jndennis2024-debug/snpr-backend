@@ -217,6 +217,7 @@ function tgSend(text) {
 // Track positions and sent alerts
 var tgPositions = {};
 var tgAlerted = {};
+var tgTokenNames = {};  // addr -> name mapping
 
 async function runTgBot() {
   try {
@@ -261,6 +262,7 @@ async function runTgBot() {
           'Contract (hold to copy):\n<code>' + addr + '</code>\n\n' +
           'Reply <b>"bought 0.05"</b> to track your position.';
 
+        tgTokenNames[addr] = name;  // Remember token name
         await tgSend(msg);
         await tgSend(addr);  // Send contract address as separate message for easy copying
         console.log('TG BUY alert sent for ' + name);
@@ -330,24 +332,43 @@ async function pollTg() {
       const text = update.message?.text?.toLowerCase() || '';
 
       if (text.includes('bought')) {
-        // Parse: "bought 0.05 SOL" or just "bought"
-        const match = text.match(/[\d.]+/);
-        const sol = match ? parseFloat(match[0]) : 0.05;
-        // Find most recently alerted token
-        const recentAddr = Object.keys(tgAlerted)[Object.keys(tgAlerted).length - 1];
-        if (recentAddr) {
-          // Get current price
+        const numMatch = text.match(/[\d.]+/);
+        const sol = numMatch ? parseFloat(numMatch[0]) : 0.05;
+
+        // Check if replying to a specific bot message (extract address from replied message)
+        let targetAddr = null;
+        const replyText = update.message?.reply_to_message?.text || '';
+        const replyAddrMatch = replyText.match(/[1-9A-HJ-NP-Za-km-z]{40,44}/);
+        if (replyAddrMatch) targetAddr = replyAddrMatch[0];
+
+        // Check if they pasted address in their own message
+        if (!targetAddr) {
+          const addrMatch = text.match(/[1-9A-HJ-NP-Za-km-z]{40,44}/);
+          if (addrMatch) targetAddr = addrMatch[0];
+        }
+
+        // Fall back to most recent alert
+        if (!targetAddr) {
+          const keys = Object.keys(tgAlerted);
+          targetAddr = keys[keys.length - 1] || null;
+        }
+
+        if (targetAddr) {
           try {
-            const pr = await fetchJSON('https://public-api.birdeye.so/defi/price?address=' + recentAddr, {
+            // Get price from Birdeye
+            const pr = await fetchJSON('https://public-api.birdeye.so/defi/price?address=' + targetAddr, {
               headers: { 'X-API-KEY': BIRDEYE_KEY2, 'x-chain': 'solana' }
             });
             const pd = pr.json();
             const price = pd.data?.value || 0;
-            tgPositions[recentAddr] = { name: recentAddr.slice(0,8)+'...', entryPrice: price, sol, pct: 0 };
-            await tgSend('✅ Position tracked!\nEntry price: $' + price.toFixed(8) + '\n' + sol + ' SOL\nI\'ll alert you at +50%, 3x, or -50%.');
-          } catch(e) {}
+            const name = tgTokenNames[targetAddr] || targetAddr.slice(0,8)+'...';
+            tgPositions[targetAddr] = { name, entryPrice: price, sol, pct: 0, pnlUsd: 0 };
+            await tgSend('✅ Tracking ' + name + '\n\nEntry: $' + price.toFixed(8) + '\nSize: ' + sol + ' SOL\n\nI\'ll text you at +50%, 3x, or -50% stop loss.');
+          } catch(e) {
+            await tgSend('❌ Could not get price. Make sure you reply directly to the signal message, or include the contract address.');
+          }
         } else {
-          await tgSend('Send me a token address to track: "track [address]"');
+          await tgSend('Reply directly to the signal message and say "bought 0.05" — I\'ll track it automatically.');
         }
       } else if (text.includes('sold')) {
         const addrs = Object.keys(tgPositions);
@@ -358,8 +379,16 @@ async function pollTg() {
           await tgSend('✅ Position closed!\nFinal P&L: ' + (pos.pct >= 0 ? '+' : '') + pos.pct.toFixed(1) + '%\nGood trade! 🎉');
         }
       } else if (text.includes('status')) {
-        const lines = Object.entries(tgPositions).map(([a, p]) => p.name + ': ' + (p.pct >= 0 ? '+' : '') + (p.pct || 0).toFixed(1) + '%');
-        await tgSend(lines.length ? '📊 Open positions:\n' + lines.join('\n') : 'No open positions.');
+        if (Object.keys(tgPositions).length === 0) {
+          await tgSend('No open positions.');
+        } else {
+          const lines = Object.entries(tgPositions).map(([a, p]) => {
+            const pct = (p.pct || 0).toFixed(1);
+            const pnl = (p.pnlUsd || 0).toFixed(2);
+            return p.name + '\n  ' + (p.pct >= 0 ? '▲ +' : '▼ ') + pct + '% ($' + (p.pct >= 0 ? '+' : '') + pnl + ')\n  Entry $' + (p.entryPrice||0).toFixed(8);
+          });
+          await tgSend('📊 Open positions:\n\n' + lines.join('\n\n'));
+        }
       } else if (text === '/start' || text === 'hi' || text === 'hello') {
         await tgSend('👋 SNPR bot ready!\n\nI\'ll send you buy signals automatically.\n\nCommands:\n• Reply "bought 0.05" after buying\n• Reply "sold" to close position\n• Reply "status" to see open positions');
       }
@@ -368,7 +397,7 @@ async function pollTg() {
 }
 
 // Start bot loops
-setInterval(runTgBot, 30000);  // scan every 30s
+setInterval(runTgBot, 300000);  // scan every 5 mins
 setInterval(pollTg, 3000);     // check replies every 3s
 runTgBot();                     // run immediately
 console.log('Telegram bot started for chat', TG_CHAT);
