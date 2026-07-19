@@ -48,7 +48,7 @@ app.get('/tokens', async (req, res) => {
         if (!p.pairCreatedAt || seen[p.pairAddress]) return false;
         seen[p.pairAddress] = true;
         const age = (now - p.pairCreatedAt) / 60000;
-        return age < 120 && parseFloat(p.liquidity?.usd || 0) > 500;
+        return age < 1440 && parseFloat(p.liquidity?.usd || 0) > 500;
       })
       .sort((a, b) => (b.pairCreatedAt || 0) - (a.pairCreatedAt || 0))
       .slice(0, 20)
