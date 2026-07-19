@@ -7,6 +7,8 @@ app.use(cors());
 app.use(express.json());
 
 const BIRDEYE_KEY = '1eac17369423494f870737d134b2771e';
+const TG_TOKEN = '8601216988:AAEMde9_gBTndYMe2_wBNjC5nk1Rm0Yg3FE';
+const TG_CHAT = '8883767485';
 
 function fetchJSON(url, options = {}) {
   return new Promise((resolve, reject) => {
@@ -22,8 +24,8 @@ function fetchJSON(url, options = {}) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        try { resolve({ ok: res.statusCode < 400, status: res.statusCode, json: () => JSON.parse(data), buffer: () => Buffer.from(data) }); }
-        catch(e) { reject(new Error('JSON parse failed: ' + data.slice(0, 200))); }
+        try { resolve({ ok: res.statusCode < 400, status: res.statusCode, json: () => JSON.parse(data) }); }
+        catch(e) { reject(new Error('Parse failed: ' + data.slice(0,100))); }
       });
     });
     req.on('error', reject);
@@ -32,172 +34,7 @@ function fetchJSON(url, options = {}) {
   });
 }
 
-function pumpBuy(publicKey, mint, amount, pool) {
-  pool = pool || 'pump';
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify({ publicKey, action: 'buy', mint, denominatedInSol: 'true', amount, slippage: 25, priorityFee: 0.005, pool: pool });
-    const bodyBuf = Buffer.from(body);
-    const opts = { hostname: 'pumpportal.fun', path: '/api/trade-local', method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': bodyBuf.length } };
-    const req = https.request(opts, (res) => {
-      const chunks = [];
-      res.on('data', c => chunks.push(c));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-    });
-    req.on('error', reject);
-    req.write(bodyBuf); req.end();
-  });
-}
-
-app.get('/', (req, res) => res.json({ status: 'SNPR backend v3 - Birdeye powered' }));
-
-app.get('/debug-birdeye', async (req, res) => {
-  try {
-    const r = await fetchJSON('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=5&min_liquidity=500', {
-      headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
-    });
-    res.json({ status: r.status, ok: r.ok, data: r.json() });
-  } catch(e) {
-    res.json({ error: e.message });
-  }
-});
-
-app.get('/solprice', async (req, res) => {
-  try {
-    const r = await fetchJSON('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
-    res.json({ success: true, price: parseFloat(r.json().price) });
-  } catch(e) { res.json({ success: false, price: 76 }); }
-});
-
-app.get('/tokens', async (req, res) => {
-  // SOURCE 1: Birdeye new listings on Solana
-  try {
-    const r = await fetchJSON('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&min_liquidity=1000', {
-      headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
-    });
-    const d = r.json();
-    const items = (d.data?.items || []).filter(i => i.liquidity > 1000);
-    if (items.length > 0) {
-      const now = Date.now();
-      const tokens = items.slice(0, 15).map(item => {
-        const addedAt = item.liquidityAddedAt ? new Date(item.liquidityAddedAt).getTime() : now;
-        const age = Math.floor((now - addedAt) / 60000);
-        const liq = item.liquidity || 0;
-        let score = 0;
-        if (liq > 2000) score += 20;
-        if (liq > 10000) score += 20;
-        if (liq > 30000) score += 15;
-        if (age < 5) score += 25;
-        else if (age < 15) score += 15;
-        else if (age < 30) score += 5;
-        // pump_amm = still on bonding curve = can buy via pump
-        if (item.source === 'pump_amm') score += 20;
-        return {
-          name: item.name || 'Unknown',
-          ticker: item.symbol || '???',
-          address: item.address,
-          pairAddress: item.address,
-          price: 0, liq,
-          buys: 0, sells: 0, ch5: 0,
-          age, score: Math.min(100, score),
-          sim: false,
-          source: item.source,
-          dexUrl: item.source === 'pump_amm' ? 'https://pump.fun/' + item.address : 'https://jup.ag/swap/SOL-' + item.address
-        };
-      });
-      return res.json({ success: true, tokens, source: 'birdeye' });
-    }
-  } catch(e) {}
-
-  // SOURCE 2: Birdeye trending tokens as fallback
-  try {
-    const r = await fetchJSON('https://public-api.birdeye.so/defi/token_trending?sort_by=rank&sort_type=asc&offset=0&limit=20', {
-      headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
-    });
-    const d = r.json();
-    const items = d.data?.tokens || d.data?.items || [];
-    if (items.length > 0) {
-      const now = Date.now();
-      const tokens = items.slice(0, 15).map(t => {
-        const age = t.createdAt ? Math.floor((now - t.createdAt * 1000) / 60000) : 999;
-        const liq = t.liquidity || 0;
-        const ch5 = t.priceChange5m || t.price5mChangePercent || 0;
-        let score = 0;
-        if (liq > 2000) score += 20; if (liq > 10000) score += 15;
-        if (ch5 > 0) score += 20; if (ch5 > 10) score += 15;
-        if (age < 30) score += 20; if (age < 10) score += 10;
-        return {
-          name: t.name || 'Unknown', ticker: t.symbol || '???',
-          address: t.address, pairAddress: t.address,
-          price: t.price || 0, liq, buys: t.trade5m || 0, sells: 0,
-          ch5, age, score: Math.min(100, score), sim: false,
-          dexUrl: 'https://pump.fun/' + t.address
-        };
-      }).filter(t => t.liq > 500);
-      if (tokens.length > 0) return res.json({ success: true, tokens, source: 'birdeye-trending' });
-    }
-  } catch(e) {}
-
-  // SOURCE 3: DexScreener last resort
-  try {
-    const r = await fetchJSON('https://api.dexscreener.com/token-boosts/latest/v1');
-    const d = r.json();
-    const boosted = (Array.isArray(d) ? d : []).filter(x => x.chainId === 'solana').slice(0, 10);
-    if (!boosted.length) throw new Error('no boosts');
-    const addrs = boosted.map(x => x.tokenAddress).join(',');
-    const r2 = await fetchJSON('https://api.dexscreener.com/latest/dex/tokens/' + addrs);
-    const d2 = r2.json();
-    const now = Date.now();
-    const tokens = (d2.pairs||[])
-      .filter(p => p && p.chainId === 'solana' && parseFloat(p.liquidity?.usd||0) > 500 && p.baseToken?.address !== 'pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn')
-      .sort((a,b) => (b.pairCreatedAt||0)-(a.pairCreatedAt||0)).slice(0, 20)
-      .map(p => {
-        const liq = parseFloat(p.liquidity?.usd||0), buys = p.txns?.h1?.buys||0, sells = p.txns?.h1?.sells||0;
-        const ch5 = parseFloat(p.priceChange?.m5||0), age = Math.floor((now-(p.pairCreatedAt||now))/60000);
-        let score = 0;
-        if(liq>3000)score+=20; if(liq>10000)score+=15;
-        if(buys>sells)score+=20; if(buys>20)score+=15; if(ch5>0)score+=15;
-        return { name: p.baseToken?.name||'Unknown', ticker: p.baseToken?.symbol||'???',
-          address: p.baseToken?.address||'', pairAddress: p.pairAddress||'',
-          price: parseFloat(p.priceUsd||0), liq, buys, sells, ch5, age, score: Math.min(100,score), sim: false };
-      });
-    return res.json({ success: true, tokens, source: 'dexscreener' });
-  } catch(e) {}
-
-  res.json({ success: false, tokens: [], error: 'All sources failed' });
-});
-
-app.post('/swap/auto', async (req, res) => {
-  try {
-    const { publicKey, mint, amount, tokenSource } = req.body;
-    
-    // pump_amm = graduated to Raydium, use 'raydium' pool
-    // pump bonding curve = use 'pump' pool
-    const pools = tokenSource === 'pump_amm' ? ['raydium', 'pump'] : ['pump', 'raydium'];
-    
-    for (const pool of pools) {
-      try {
-        const rawBytes = await pumpBuy(publicKey, mint, amount, pool);
-        const text = rawBytes ? rawBytes.toString('utf8').slice(0,100) : 'empty';
-        console.log('Pool '+pool+': bytes='+rawBytes?.length+' text='+text.slice(0,50));
-        if (rawBytes && rawBytes.length > 100 && rawBytes[0] === 1) {
-          return res.json({ success: true, transaction: rawBytes.toString('base64'), source: 'pump-'+pool });
-        }
-      } catch(pe) { console.log('Pool '+pool+' error: '+pe.message); }
-    }
-    throw new Error('All pools failed for ' + mint);
-  } catch(e) {
-    res.json({ success: false, error: e.message });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('SNPR backend v3 running on port', PORT));
-
-// ─── TELEGRAM BOT ────────────────────────────────────────────────────────────
-const TG_TOKEN = '8601216988:AAEMde9_gBTndYMe2_wBNjC5nk1Rm0Yg3FE';
-const TG_CHAT  = '8883767485';
-const BIRDEYE_KEY2 = '1eac17369423494f870737d134b2771e';
-
+// ─── TELEGRAM ────────────────────────────────────────────────────────────────
 function tgSend(text) {
   const body = JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: 'HTML', disable_web_page_preview: true });
   const buf = Buffer.from(body);
@@ -208,25 +45,84 @@ function tgSend(text) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': buf.length }
     };
-    const req = https.request(opts, r => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>res(d)); });
+    const req = https.request(opts, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(d)); });
     req.on('error', rej);
     req.write(buf); req.end();
   });
 }
 
-// Track positions and sent alerts
-var tgPositions = {};
-var tgAlerted = {};
-var tgTokenNames = {};  // addr -> name mapping
+// ─── STATE ───────────────────────────────────────────────────────────────────
+var positions = {};   // addr -> { name, ticker, amount, entryPrice, pct, pnlUsd, alerts }
+var alerted = {};     // addr -> token name (recently alerted buy signals)
+var tgOffset = 0;
 
-async function runTgBot() {
+// ─── PRICE LOOKUP ────────────────────────────────────────────────────────────
+async function getPrice(addr) {
+  const r = await fetchJSON('https://public-api.birdeye.so/defi/price?address=' + addr, {
+    headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
+  });
+  return parseFloat(r.json().data?.value || 0);
+}
+
+async function findTokenByTicker(ticker) {
+  // Search Birdeye for ticker
+  const r = await fetchJSON('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=50&min_liquidity=100', {
+    headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
+  });
+  const items = r.json().data?.items || [];
+  const found = items.find(t => t.symbol?.toUpperCase() === ticker.toUpperCase());
+  if (found) return { address: found.address, name: found.name, ticker: found.symbol };
+
+  // Also check alerted tokens
+  for (const [addr, info] of Object.entries(alerted)) {
+    if (info.ticker && info.ticker.toUpperCase() === ticker.toUpperCase()) {
+      return { address: addr, name: info.name, ticker: info.ticker };
+    }
+  }
+  return null;
+}
+
+// ─── POSITION MONITOR ────────────────────────────────────────────────────────
+async function checkPositions() {
+  for (const [addr, pos] of Object.entries(positions)) {
+    try {
+      const price = await getPrice(addr);
+      if (!price || !pos.entryPrice) continue;
+      const pct = (price - pos.entryPrice) / pos.entryPrice * 100;
+      const pnlUsd = (pct / 100) * pos.amount * pos.entryPrice;
+      pos.pct = pct;
+      pos.pnlUsd = pnlUsd;
+      pos.currentPrice = price;
+
+      // Sell alerts — only send each once
+      if (pct >= 200 && !pos.alerts?.tp3x) {
+        pos.alerts = pos.alerts || {};
+        pos.alerts.tp3x = true;
+        await tgSend('🎯 <b>3X HIT: ' + pos.name + '</b>\n\n🚀 Up <b>+' + pct.toFixed(0) + '%</b>\nEntry: $' + pos.entryPrice.toFixed(8) + '\nNow: $' + price.toFixed(8) + '\n\n💰 Consider selling! Reply "sold ' + pos.ticker + '" to close.');
+      } else if (pct >= 100 && !pos.alerts?.tp2x) {
+        pos.alerts = pos.alerts || {};
+        pos.alerts.tp2x = true;
+        await tgSend('📈 <b>2X: ' + pos.name + '</b>\n\nUp <b>+' + pct.toFixed(0) + '%</b> — consider taking some profit.\nReply "sold ' + pos.ticker + '" to close.');
+      } else if (pct >= 50 && !pos.alerts?.tp50) {
+        pos.alerts = pos.alerts || {};
+        pos.alerts.tp50 = true;
+        await tgSend('📈 <b>UP 50%: ' + pos.name + '</b>\n\n+' + pct.toFixed(1) + '% — moving nicely. Watch for pullback.');
+      } else if (pct <= -50 && !pos.alerts?.sl) {
+        pos.alerts = pos.alerts || {};
+        pos.alerts.sl = true;
+        await tgSend('⚠️ <b>STOP LOSS: ' + pos.name + '</b>\n\n📉 Down <b>' + pct.toFixed(0) + '%</b>\nConsider cutting losses. Reply "sold ' + pos.ticker + '" to close.');
+      }
+    } catch(e) {}
+  }
+}
+
+// ─── TOKEN SCANNER ───────────────────────────────────────────────────────────
+async function scanTokens() {
   try {
-    // Fetch fresh tokens
     const r = await fetchJSON('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&min_liquidity=1000', {
-      headers: { 'X-API-KEY': BIRDEYE_KEY2, 'x-chain': 'solana' }
+      headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
     });
-    const d = r.json();
-    const items = (d.data?.items || []).filter(i => i.liquidity > 1000);
+    const items = (r.json().data?.items || []).filter(i => i.liquidity > 1000);
     const now = Date.now();
 
     for (const item of items) {
@@ -236,7 +132,6 @@ async function runTgBot() {
       const name = item.name || 'Unknown';
       const ticker = item.symbol || '???';
 
-      // Score
       let score = 0;
       if (liq > 5000) score += 20;
       if (liq > 20000) score += 20;
@@ -245,159 +140,157 @@ async function runTgBot() {
       else if (age < 15) score += 15;
       if (item.source === 'pump_amm') score += 15;
 
-      // Send BUY alert if score high enough and not already alerted
-      if (score >= 60 && !tgAlerted[addr] && age < 15) {
-        tgAlerted[addr] = true;
+      if (score >= 60 && !alerted[addr] && age < 15) {
+        alerted[addr] = { name, ticker };
+        setTimeout(() => { delete alerted[addr]; }, 60 * 60 * 1000); // clear after 1hr
+
         const msg =
-          '🟢 <b>BUY SIGNAL: ' + name + ' ($' + ticker + ')</b>\n\n' +
-          '💧 Liquidity: $' + (liq >= 1000 ? (liq/1000).toFixed(1)+'K' : liq.toFixed(0)) + '\n' +
-          '⏱ Age: ' + age + ' minutes old\n' +
+          '🟢 <b>' + name + ' ($' + ticker + ')</b>\n\n' +
+          '💧 Liq: $' + (liq >= 1000 ? (liq/1000).toFixed(1)+'K' : liq.toFixed(0)) + '\n' +
+          '⏱ Age: ' + age + 'm old\n' +
           '📊 Score: ' + score + '/100\n\n' +
-          '👇 <b>How to buy in Phantom:</b>\n' +
-          '1. Open Phantom app\n' +
-          '2. Tap <b>Swap</b>\n' +
-          '3. Tap the output token field\n' +
-          '👇 <b>Tap to swap in Phantom:</b>\n' +
-          'https://phantom.app/ul/swap?inputMint=So11111111111111111111111111111111111111112&outputMint=' + addr + '\n\n' +
-          'Contract (hold to copy):\n<code>' + addr + '</code>\n\n' +
-          'Reply <b>"bought 0.05"</b> to track your position.';
+          '👇 Buy in Phantom → Swap → paste CA:\n' +
+          '<code>' + addr + '</code>\n\n' +
+          'Then reply: <b>"bought 118.72 of ' + ticker + '"</b>';
 
-        tgTokenNames[addr] = name;  // Remember token name
         await tgSend(msg);
-        await tgSend(addr);  // Send contract address as separate message for easy copying
-        console.log('TG BUY alert sent for ' + name);
-
-        // Auto-clear alert after 30 mins so it can re-alert if still relevant
-        setTimeout(() => { delete tgAlerted[addr]; }, 30 * 60 * 1000);
+        await tgSend(addr); // separate message for easy copy
+        console.log('Signal sent: ' + name);
       }
     }
-
-    // Check open positions for sell signals
-    for (const addr in tgPositions) {
-      const pos = tgPositions[addr];
-      try {
-        const pr = await fetchJSON('https://public-api.birdeye.so/defi/price?address=' + addr, {
-          headers: { 'X-API-KEY': BIRDEYE_KEY2, 'x-chain': 'solana' }
-        });
-        const pd = pr.json();
-        const currentPrice = pd.data?.value || 0;
-        if (!currentPrice || !pos.entryPrice) continue;
-
-        const pct = (currentPrice - pos.entryPrice) / pos.entryPrice * 100;
-        pos.currentPrice = currentPrice;
-        pos.pct = pct;
-
-        // Sell signals
-        if (pct >= 200 && !pos.tp3xSent) {
-          pos.tp3xSent = true;
-          await tgSend(
-            '🎯 <b>TAKE PROFIT: ' + pos.name + '</b>\n\n' +
-            '🚀 Up <b>+' + pct.toFixed(0) + '%</b> (3x hit!)\n' +
-            'Entry: $' + pos.entryPrice.toFixed(8) + '\n' +
-            'Now: $' + currentPrice.toFixed(8) + '\n\n' +
-            '💰 Sell on Jupiter:\nhttps://jup.ag/swap/' + addr + '-SOL\n\n' +
-            'Reply "sold" to close position.'
-          );
-        } else if (pct <= -50 && !pos.slSent) {
-          pos.slSent = true;
-          await tgSend(
-            '⚠️ <b>STOP LOSS: ' + pos.name + '</b>\n\n' +
-            '📉 Down <b>' + pct.toFixed(0) + '%</b>\n' +
-            'Entry: $' + pos.entryPrice.toFixed(8) + '\n' +
-            'Now: $' + currentPrice.toFixed(8) + '\n\n' +
-            '🔴 Consider cutting losses:\nhttps://jup.ag/swap/' + addr + '-SOL'
-          );
-        } else if (pct >= 50 && !pos.tp50Sent) {
-          pos.tp50Sent = true;
-          await tgSend(
-            '📈 <b>UP 50%: ' + pos.name + '</b>\n\n' +
-            'Currently at +' + pct.toFixed(0) + '%. Consider taking some profit or moving stop loss to breakeven.'
-          );
-        }
-      } catch(e) {}
-    }
-  } catch(e) {
-    console.log('TG bot error:', e.message);
-  }
+  } catch(e) { console.log('Scan error:', e.message); }
 }
 
-// Poll Telegram for user replies
-let tgOffset = 0;
+// ─── TELEGRAM POLLING ────────────────────────────────────────────────────────
 async function pollTg() {
   try {
     const r = await fetchJSON('https://api.telegram.org/bot' + TG_TOKEN + '/getUpdates?offset=' + tgOffset + '&timeout=5');
-    const d = r.json();
-    for (const update of (d.result || [])) {
+    const updates = r.json().result || [];
+
+    for (const update of updates) {
       tgOffset = update.update_id + 1;
-      const text = update.message?.text?.toLowerCase() || '';
+      const raw = update.message?.text || '';
+      const lower = raw.toLowerCase().trim();
 
-      if (text.includes('bought')) {
-        const numMatch = text.match(/[\d.]+/);
-        const sol = numMatch ? parseFloat(numMatch[0]) : 0.05;
+      // BOUGHT: "bought 118.72 of BMCRISE"
+      if (lower.startsWith('bought')) {
+        const numMatch = raw.match(/[\d,.]+/);
+        const amount = numMatch ? parseFloat(numMatch[0].replace(',', '')) : 0;
+        const ofMatch = raw.match(/\bof\s+([A-Za-z0-9]+)/i);
+        const capsMatch = raw.match(/\b([A-Z]{2,10})\b/g);
+        const ticker = ofMatch ? ofMatch[1].toUpperCase() : (capsMatch ? capsMatch[capsMatch.length - 1] : null);
 
-        // Check if replying to a specific bot message (extract address from replied message)
-        let targetAddr = null;
-        const replyText = update.message?.reply_to_message?.text || '';
-        const replyAddrMatch = replyText.match(/[1-9A-HJ-NP-Za-km-z]{40,44}/);
-        if (replyAddrMatch) targetAddr = replyAddrMatch[0];
-
-        // Check if they pasted address in their own message
-        if (!targetAddr) {
-          const addrMatch = text.match(/[1-9A-HJ-NP-Za-km-z]{40,44}/);
-          if (addrMatch) targetAddr = addrMatch[0];
+        if (!amount || !ticker) {
+          await tgSend('Format: "bought 118.72 of BMCRISE"');
+          continue;
         }
 
-        // Fall back to most recent alert
-        if (!targetAddr) {
-          const keys = Object.keys(tgAlerted);
-          targetAddr = keys[keys.length - 1] || null;
+        await tgSend('🔍 Looking up ' + ticker + '...');
+
+        const token = await findTokenByTicker(ticker).catch(() => null);
+        if (!token) {
+          await tgSend('❌ Could not find $' + ticker + '. Make sure the symbol matches exactly.');
+          continue;
         }
 
-        if (targetAddr) {
+        const price = await getPrice(token.address).catch(() => 0);
+        positions[token.address] = {
+          name: token.name, ticker,
+          amount, entryPrice: price,
+          pct: 0, pnlUsd: 0, alerts: {}
+        };
+
+        await tgSend('✅ <b>Tracking ' + token.name + '</b>\n\nAmount: ' + amount.toLocaleString() + ' tokens\nEntry: $' + price.toFixed(8) + '\n\nI\'ll alert you at +50%, 2x, 3x, and -50% stop loss.');
+      }
+
+      // SOLD: "sold BMCRISE" or just "sold"
+      else if (lower.startsWith('sold')) {
+        const tickerMatch = raw.match(/\b([A-Z]{2,10})\b/);
+        const ticker = tickerMatch ? tickerMatch[1] : null;
+        const addr = ticker
+          ? Object.keys(positions).find(a => positions[a].ticker === ticker)
+          : Object.keys(positions)[Object.keys(positions).length - 1];
+
+        if (addr && positions[addr]) {
+          const pos = positions[addr];
+          delete positions[addr];
+          await tgSend('✅ <b>Closed ' + pos.name + '</b>\n\nP&L: ' + (pos.pct >= 0 ? '+' : '') + pos.pct.toFixed(1) + '% ($' + (pos.pnlUsd >= 0 ? '+' : '') + pos.pnlUsd.toFixed(2) + ')');
+        } else {
+          await tgSend('No position found for that ticker. Try "sold BMCRISE"');
+        }
+      }
+
+      // STATUS
+      else if (lower === 'status' || lower === '/status') {
+        if (!Object.keys(positions).length) { await tgSend('No open positions.'); continue; }
+        let msg = '📊 <b>Positions</b>\n\n';
+        for (const [addr, pos] of Object.entries(positions)) {
           try {
-            // Get price from Birdeye
-            const pr = await fetchJSON('https://public-api.birdeye.so/defi/price?address=' + targetAddr, {
-              headers: { 'X-API-KEY': BIRDEYE_KEY2, 'x-chain': 'solana' }
-            });
-            const pd = pr.json();
-            const price = pd.data?.value || 0;
-            const name = tgTokenNames[targetAddr] || targetAddr.slice(0,8)+'...';
-            tgPositions[targetAddr] = { name, entryPrice: price, sol, pct: 0, pnlUsd: 0 };
-            await tgSend('✅ Tracking ' + name + '\n\nEntry: $' + price.toFixed(8) + '\nSize: ' + sol + ' SOL\n\nI\'ll text you at +50%, 3x, or -50% stop loss.');
-          } catch(e) {
-            await tgSend('❌ Could not get price. Make sure you reply directly to the signal message, or include the contract address.');
-          }
-        } else {
-          await tgSend('Reply directly to the signal message and say "bought 0.05" — I\'ll track it automatically.');
+            const price = await getPrice(addr);
+            const pct = (price - pos.entryPrice) / pos.entryPrice * 100;
+            const pnl = (pct / 100) * pos.amount * pos.entryPrice;
+            pos.pct = pct; pos.pnlUsd = pnl; pos.currentPrice = price;
+            msg += '<b>' + pos.name + ' ($' + pos.ticker + ')</b>\n';
+            msg += (pct >= 0 ? '▲ +' : '▼ ') + pct.toFixed(1) + '% | ' + (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2) + '\n';
+            msg += 'Entry $' + pos.entryPrice.toFixed(8) + ' → $' + price.toFixed(8) + '\n\n';
+          } catch(e) { msg += pos.name + ': unavailable\n\n'; }
         }
-      } else if (text.includes('sold')) {
-        const addrs = Object.keys(tgPositions);
-        if (addrs.length > 0) {
-          const addr = addrs[addrs.length - 1];
-          const pos = tgPositions[addr];
-          delete tgPositions[addr];
-          await tgSend('✅ Position closed!\nFinal P&L: ' + (pos.pct >= 0 ? '+' : '') + pos.pct.toFixed(1) + '%\nGood trade! 🎉');
-        }
-      } else if (text.includes('status')) {
-        if (Object.keys(tgPositions).length === 0) {
-          await tgSend('No open positions.');
-        } else {
-          const lines = Object.entries(tgPositions).map(([a, p]) => {
-            const pct = (p.pct || 0).toFixed(1);
-            const pnl = (p.pnlUsd || 0).toFixed(2);
-            return p.name + '\n  ' + (p.pct >= 0 ? '▲ +' : '▼ ') + pct + '% ($' + (p.pct >= 0 ? '+' : '') + pnl + ')\n  Entry $' + (p.entryPrice||0).toFixed(8);
-          });
-          await tgSend('📊 Open positions:\n\n' + lines.join('\n\n'));
-        }
-      } else if (text === '/start' || text === 'hi' || text === 'hello') {
-        await tgSend('👋 SNPR bot ready!\n\nI\'ll send you buy signals automatically.\n\nCommands:\n• Reply "bought 0.05" after buying\n• Reply "sold" to close position\n• Reply "status" to see open positions');
+        await tgSend(msg);
+      }
+
+      // RESET
+      else if (lower === 'reset holdings' || lower === 'reset') {
+        positions = {};
+        await tgSend('🔄 All positions cleared.');
+      }
+
+      // HELP / START
+      else if (lower === '/start' || lower === 'hi' || lower === 'hello' || lower === 'help') {
+        await tgSend('👋 <b>SNPR Bot</b>\n\nI send buy signals every 5 mins and monitor your positions.\n\n<b>Commands:</b>\n• <code>bought 118.72 of BMCRISE</code>\n• <code>sold BMCRISE</code>\n• <code>status</code> — see P&L\n• <code>reset holdings</code> — clear all positions');
       }
     }
-  } catch(e) {}
+  } catch(e) { console.log('pollTg error:', e.message); }
 }
 
-// Start bot loops
-setInterval(runTgBot, 300000);  // scan every 5 mins
-setInterval(pollTg, 3000);     // check replies every 3s
-runTgBot();                     // run immediately
-console.log('Telegram bot started for chat', TG_CHAT);
+// ─── EXPRESS ROUTES ──────────────────────────────────────────────────────────
+app.get('/', (req, res) => res.json({ status: 'SNPR bot running', positions: Object.keys(positions).length }));
+
+app.get('/tokens', async (req, res) => {
+  try {
+    const r = await fetchJSON('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&min_liquidity=1000', {
+      headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
+    });
+    const items = (r.json().data?.items || []);
+    const now = Date.now();
+    const tokens = items.map(item => {
+      const age = Math.floor((now - new Date(item.liquidityAddedAt).getTime()) / 60000);
+      const liq = item.liquidity || 0;
+      let score = 0;
+      if (liq > 2000) score += 20; if (liq > 10000) score += 20; if (liq > 30000) score += 15;
+      if (age < 5) score += 25; else if (age < 15) score += 15; else if (age < 30) score += 5;
+      if (item.source === 'pump_amm') score += 20;
+      return { name: item.name, ticker: item.symbol, address: item.address, liq, age, score: Math.min(100, score), source: item.source };
+    });
+    res.json({ success: true, tokens, source: 'birdeye' });
+  } catch(e) { res.json({ success: false, tokens: [], error: e.message }); }
+});
+
+app.get('/solprice', async (req, res) => {
+  try {
+    const r = await fetchJSON('https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT');
+    res.json({ price: parseFloat(r.json().price) });
+  } catch(e) { res.json({ price: 76 }); }
+});
+
+// ─── START ───────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('SNPR running on port', PORT));
+
+setInterval(scanTokens, 300000);   // scan every 5 mins
+setInterval(checkPositions, 30000); // check positions every 30s
+setInterval(pollTg, 3000);          // check replies every 3s
+
+scanTokens();  // run immediately
+pollTg();
+tgSend('🤖 SNPR bot started! Send "help" for commands.');
+console.log('Bot live for chat', TG_CHAT);
