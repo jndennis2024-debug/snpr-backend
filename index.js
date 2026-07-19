@@ -54,6 +54,7 @@ function tgSend(text) {
 // ─── STATE ───────────────────────────────────────────────────────────────────
 var positions = {};   // addr -> { name, ticker, amount, entryPrice, pct, pnlUsd, alerts }
 var alerted = {};     // addr -> token name (recently alerted buy signals)
+var pendingBought = {}; // ticker -> { amount } waiting for address
 var tgOffset = 0;
 
 // ─── PRICE LOOKUP ────────────────────────────────────────────────────────────
@@ -236,6 +237,30 @@ async function pollTg() {
           } catch(e) { msg += pos.name + ': unavailable\n\n'; }
         }
         await tgSend(msg);
+      }
+
+      // ADDRESS: "address BMCRISE AbC123..."
+      else if (lower.startsWith('address ')) {
+        const parts = raw.trim().split(/\s+/);
+        const ticker = parts[1]?.toUpperCase();
+        const addr = parts[2];
+        if (ticker && addr && addr.length > 30) {
+          const pending = pendingBought[ticker];
+          const amount = pending?.amount || 0;
+          delete pendingBought[ticker];
+          try {
+            const price = await getPrice(addr).catch(() => 0);
+            positions[addr] = { name: ticker, ticker, amount, entryPrice: price, pct: 0, pnlUsd: 0, alerts: {} };
+            await tgSend('✅ <b>Tracking $' + ticker + '</b>
+
+Amount: ' + (amount||'?').toLocaleString() + ' tokens
+Entry: $' + price.toFixed(8) + '
+
+I'll alert you at +50%, 2x, 3x, and -50%.');
+          } catch(e) { await tgSend('❌ Could not get price for that address.'); }
+        } else {
+          await tgSend('Format: "address BMCRISE [CONTRACT_ADDRESS]"');
+        }
       }
 
       // RESET
