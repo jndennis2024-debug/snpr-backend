@@ -71,6 +71,7 @@ function rpc(method, params) {
 
 async function getSOLBalance() {
   var d = await rpc('getBalance', [WALLET_ADDR]);
+  console.log('getBalance response:', JSON.stringify(d));
   return (d.result && d.result.value ? d.result.value : 0) / 1e9;
 }
 
