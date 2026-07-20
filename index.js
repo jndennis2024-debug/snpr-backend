@@ -14,9 +14,8 @@ const BIRDEYE_KEY     = '1eac17369423494f870737d134b2771e';
 const TG_TOKEN        = '8601216988:AAEMde9_gBTndYMe2_wBNjC5nk1Rm0Yg3FE';
 const TG_CHAT         = '8883767485';
 const RPCS = [
-  'https://api.mainnet-beta.solana.com',
-  'https://solana-api.projectserum.com',
-  'https://rpc.ankr.com/solana'
+  'https://mainnet.helius-rpc.com/?api-key=2a3b07b9-e919-4be1-aa6f-6d42d17c0175',
+  'https://api.mainnet-beta.solana.com'
 ];
 const RPC = RPCS[0];
 
