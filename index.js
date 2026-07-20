@@ -18,8 +18,8 @@ const RPC             = 'https://api.mainnet-beta.solana.com';
 // Token mints
 const MINTS = {
   SOL:  'So11111111111111111111111111111111111111112',
-  BTC:  '9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E',
-  ETH:  '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs',
+  BTC:  '3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh',  // Wormhole wBTC (most liquid on Jupiter)
+  ETH:  '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs',  // Wormhole wETH
   USDC: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 };
 
@@ -256,7 +256,7 @@ async function tradingCycle() {
   const solBal = await getSOLBalance().catch(() => 0);
   const totalSOL = solBal;
 
-  for (const sym of ['SOL','BTC','ETH']) {
+  for (const sym of ['SOL','BTC','ETH'].filter(s => latestPrice[s] > 0)) {
     const sig = signal(sym);
     const price = latestPrice[sym];
     if (!price) continue;
@@ -366,7 +366,7 @@ async function pollTg() {
         await tg(msg);
       } else if (text === 'prices' || text === '/prices') {
         let msg = '💹 <b>Prices & Signals</b>\n\n';
-        for (const sym of ['SOL','BTC','ETH']) {
+        for (const sym of ['SOL','BTC','ETH'].filter(s => latestPrice[s] > 0)) {
           const sig = signal(sym);
           msg += '<b>' + sym + '</b>: $' + (latestPrice[sym]||0).toLocaleString() + ' — ' + sig.action.toUpperCase() + ' (' + sig.score + ')\n';
         }
