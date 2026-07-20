@@ -59,7 +59,7 @@ try {
 }
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
-function req(url, options = {}) {
+function req2(url, options = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const lib = url.startsWith('https') ? https : http;
@@ -100,7 +100,7 @@ async function rpcCall(method, params) {
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
   for (const rpc of RPCS) {
     try {
-      const r = await req(rpc, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const r = await req2(rpc, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
       const d = r.json();
       if (d.result !== undefined) return d;
     } catch(e) {}
@@ -123,7 +123,7 @@ async function sendRawTx(serialized) {
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'sendTransaction',
     params: [b64, { encoding: 'base64', skipPreflight: false, preflightCommitment: 'confirmed' }]
   });
-  const r = await req(RPC, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  const r = await req2(RPC, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
   const d = r.json();
   if (d.error) throw new Error(d.error.message);
   return d.result; // signature
@@ -132,7 +132,7 @@ async function sendRawTx(serialized) {
 // ─── JUPITER SWAP ─────────────────────────────────────────────────────────────
 async function jupiterSwap(inputMint, outputMint, amountLamports) {
   // Get quote
-  const qr = await req(
+  const qr = await req2(
     'https://quote-api.jup.ag/v6/quote?inputMint=' + inputMint +
     '&outputMint=' + outputMint + '&amount=' + amountLamports + '&slippageBps=150'
   );
@@ -146,7 +146,7 @@ async function jupiterSwap(inputMint, outputMint, amountLamports) {
     wrapAndUnwrapSol: true,
     prioritizationFeeLamports: 300000
   });
-  const sr = await req('https://quote-api.jup.ag/v6/swap', {
+  const sr = await req2('https://quote-api.jup.ag/v6/swap', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body
   });
   const swapData = sr.json();
@@ -185,7 +185,7 @@ const latestPrice = { SOL: 0, BTC: 0, ETH: 0 };
 async function fetchPrices() {
   for (const [sym, mint] of Object.entries({ SOL: MINTS.SOL, BTC: MINTS.BTC, ETH: MINTS.ETH })) {
     try {
-      const r = await req('https://public-api.birdeye.so/defi/price?address=' + mint, {
+      const r = await req2('https://public-api.birdeye.so/defi/price?address=' + mint, {
         headers: { 'X-API-KEY': BIRDEYE_KEY, 'x-chain': 'solana' }
       });
       const price = parseFloat(r.json().data?.value || 0);
@@ -358,7 +358,7 @@ async function tradingCycle() {
 let tgOffset = 0;
 async function pollTg() {
   try {
-    const r = await req('https://api.telegram.org/bot' + TG_TOKEN + '/getUpdates?offset=' + tgOffset + '&timeout=5');
+    const r = await req2('https://api.telegram.org/bot' + TG_TOKEN + '/getUpdates?offset=' + tgOffset + '&timeout=5');
     for (const u of (r.json().result || [])) {
       tgOffset = u.update_id + 1;
       const text = (u.message?.text || '').toLowerCase().trim();
@@ -396,6 +396,20 @@ async function pollTg() {
 
 // ─── API ROUTES ───────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({ running: isRunning, trades: trades.length, sessionPnl, wallet: WALLET_ADDR }));
+
+app.get('/debug', async (req, res) => {
+  const results = [];
+  for (const rpc of RPCS) {
+    try {
+      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [WALLET_ADDR] });
+      const r = await req2(rpc, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      results.push({ rpc: rpc.slice(0,40), status: r.status, data: r.json() });
+    } catch(e) {
+      results.push({ rpc: rpc.slice(0,40), error: e.message });
+    }
+  }
+  res.json({ wallet: WALLET_ADDR, results });
+});
 app.get('/prices', (req, res) => {
   const sigs = {};
   for (const sym of ['SOL','BTC','ETH']) sigs[sym] = signal(sym);
