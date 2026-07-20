@@ -13,7 +13,12 @@ const WALLET_ADDR     = 'qeLQghrpmbVrVyActpBe2nK1tVdejvGykQ6D9qZKJLU';
 const BIRDEYE_KEY     = '1eac17369423494f870737d134b2771e';
 const TG_TOKEN        = '8601216988:AAEMde9_gBTndYMe2_wBNjC5nk1Rm0Yg3FE';
 const TG_CHAT         = '8883767485';
-const RPC             = 'https://api.mainnet-beta.solana.com';
+const RPCS = [
+  'https://api.mainnet-beta.solana.com',
+  'https://solana-api.projectserum.com',
+  'https://rpc.ankr.com/solana'
+];
+const RPC = RPCS[0];
 
 // Token mints
 const MINTS = {
@@ -94,8 +99,14 @@ function tg(text) {
 // ─── SOLANA RPC ───────────────────────────────────────────────────────────────
 async function rpcCall(method, params) {
   const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
-  const r = await req(RPC, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-  return r.json();
+  for (const rpc of RPCS) {
+    try {
+      const r = await req(rpc, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+      const d = r.json();
+      if (d.result !== undefined) return d;
+    } catch(e) {}
+  }
+  return { result: null };
 }
 
 async function getSOLBalance() {
